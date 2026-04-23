@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: mevduat-rate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   post-rate:
     runs-on: ubuntu-latest
@@ -21,11 +25,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Security audit dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
 
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
@@ -34,7 +44,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-          TELEGRAM_ALLOWED_CHAT_IDS: ${{ secrets.TELEGRAM_ALLOWED_CHAT_IDS }}
           TARGET_CURRENCY: USD
           PLAYWRIGHT_HEADLESS: true
         run: python -m mevduat_bot run-once

@@ -104,15 +104,12 @@ async def _dismiss_cookie_banner(page: Page) -> None:
 
 async def _activate_currency(page: Page, currency: str) -> None:
     labels = page.locator(CURRENCY_LABEL_SELECTOR)
-    match = labels.filter(has_text=currency).first
+    match = labels.filter(has_text=re.compile(rf"^\s*{re.escape(currency)}\s*$", re.I)).first
+
+    if not await match.count():
+        raise FetchError(f"Currency selector not found for: {currency}")
+
     await match.click()
-    await page.wait_for_function(
-        """([selector, value]) => {
-            const label = document.querySelector(selector);
-            return Boolean(label && label.textContent && label.textContent.trim() === value);
-        }""",
-        arg=[".btn-group-toggle .active-input", currency],
-    )
 
 
 def _clean(value: str) -> str:
