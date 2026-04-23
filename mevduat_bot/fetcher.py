@@ -68,13 +68,42 @@ async def _fetch_with_context(
         await _activate_currency(page, settings.target_currency)
         LOGGER.info("Currency %s activated", settings.target_currency)
         
-        # Wait for table data to load with retries
-        row = page.locator(ROW_SELECTOR).first
-        await row.wait_for(state="visible")
-        LOGGER.debug("Table row is visible")
+        # Wait for table data to load with diagnostics
+        await asyncio.sleep(2)  # Longer initial wait for table to render after currency switch
+        LOGGER.debug("Waited 2s for table render after currency switch")
         
-        await asyncio.sleep(1)  # Allow table to render with new currency data
-        LOGGER.debug("Waited 1s for table render")
+        # Check what's actually on the page
+        table_body_count = await page.locator(TABLE_BODY_SELECTOR).count()
+        LOGGER.debug("Table body (#%s) element count: %d", TABLE_BODY_SELECTOR.lstrip("#"), table_body_count)
+        
+        row_selector_use = ROW_SELECTOR
+        if table_body_count == 0:
+            # Try alternative selector
+            alt_selector = "table tbody tr"
+            alt_count = await page.locator(alt_selector).count()
+            LOGGER.warning("Primary table selector found 0 elements, trying alternative '%s': %d elements", alt_selector, alt_count)
+            if alt_count > 0:
+                row_selector_use = alt_selector
+            else:
+                raise FetchError(f"No table rows found with any selector")
+        
+        # Get first row with diagnostics
+        row = page.locator(row_selector_use).first
+        row_count = await row.count()
+        LOGGER.debug("First row locator count: %d", row_count)
+        
+        if row_count == 0:
+            raise FetchError(f"No rows found in table selector: {row_selector_use}")
+        
+        # Try to wait for visibility with a fallback
+        try:
+            await row.wait_for(state="visible", timeout=5_000)
+            LOGGER.debug("Table row became visible after 5s wait")
+        except TimeoutError:
+            LOGGER.warning("Row did not become visible within 5s, but proceeding anyway")
+        
+        await asyncio.sleep(1)  # Allow table to fully render
+        LOGGER.debug("Waited 1s for final table render")
         
         # Verify currency is switched by checking cell content
         max_retries = 5
