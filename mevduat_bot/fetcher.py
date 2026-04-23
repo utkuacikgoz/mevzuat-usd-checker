@@ -52,20 +52,25 @@ async def _fetch_with_context(
         await page.wait_for_load_state("networkidle")
         await _dismiss_cookie_banner(page)
         await _activate_currency(page, settings.target_currency)
+        
+        # Wait for table data to load with retries
         row = page.locator(ROW_SELECTOR).first
         await row.wait_for(state="visible")
-        await page.wait_for_function(
-            """([selector, expectedCurrency]) => {
-                const row = document.querySelector(selector);
-                if (!row) {
-                    return false;
-                }
-                const cells = row.querySelectorAll("td");
-                return cells.length > 7 && cells[7].textContent.trim() === expectedCurrency;
-            }""",
-            args=[ROW_SELECTOR, settings.target_currency],
-        )
-
+        await asyncio.sleep(1)  # Allow table to render with new currency data
+        
+        # Verify currency is switched by checking cell content
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
+                if len(cells) > 7 and cells[7].strip() == settings.target_currency:
+                    break
+                await asyncio.sleep(0.5)
+            except Exception:
+                await asyncio.sleep(0.5)
+                if attempt == max_retries - 1:
+                    raise FetchError("Currency data did not load within timeout.")
+        
         cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
         if len(cells) < 6 or not cells[3].strip():
             raise FetchError("Table row is missing expected columns or current value.")
