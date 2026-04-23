@@ -63,7 +63,7 @@ async def _fetch_with_context(
                 const cells = row.querySelectorAll("td");
                 return cells.length > 7 && cells[7].textContent.trim() === expectedCurrency;
             }""",
-            [ROW_SELECTOR, settings.target_currency],
+            arg=[ROW_SELECTOR, settings.target_currency],
         )
 
         cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
@@ -111,7 +111,7 @@ async def _activate_currency(page: Page, currency: str) -> None:
             const label = document.querySelector(selector);
             return Boolean(label && label.textContent && label.textContent.trim() === value);
         }""",
-        [".btn-group-toggle .active-input", currency],
+        arg=[".btn-group-toggle .active-input", currency],
     )
 
 
