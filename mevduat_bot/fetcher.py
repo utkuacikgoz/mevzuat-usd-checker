@@ -63,7 +63,7 @@ async def _fetch_with_context(
                 const cells = row.querySelectorAll("td");
                 return cells.length > 7 && cells[7].textContent.trim() === expectedCurrency;
             }""",
-            arg=[ROW_SELECTOR, settings.target_currency],
+            args=[ROW_SELECTOR, settings.target_currency],
         )
 
         cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
