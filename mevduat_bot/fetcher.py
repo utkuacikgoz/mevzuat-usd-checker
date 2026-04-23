@@ -87,20 +87,44 @@ async def _fetch_with_context(
             else:
                 raise FetchError(f"No table rows found with any selector")
         
-        # Get first row with diagnostics
-        row = page.locator(row_selector_use).first
-        row_count = await row.count()
-        LOGGER.debug("First row locator count: %d", row_count)
-        
-        if row_count == 0:
+        # Prefer visible and non-hidden rows. The table keeps hidden template rows with class d-none.
+        candidate_selectors = [
+            f"{row_selector_use}:not(.d-none):visible",
+            f"{row_selector_use}:not(.d-none)",
+            f"{row_selector_use}:visible",
+            row_selector_use,
+        ]
+
+        selected_row_selector: str | None = None
+        for attempt in range(10):
+            for candidate in candidate_selectors:
+                candidate_count = await page.locator(candidate).count()
+                LOGGER.debug(
+                    "Row selector probe attempt %d: '%s' -> %d",
+                    attempt + 1,
+                    candidate,
+                    candidate_count,
+                )
+                if candidate_count > 0:
+                    selected_row_selector = candidate
+                    break
+            if selected_row_selector:
+                break
+            await asyncio.sleep(1)
+
+        if not selected_row_selector:
             raise FetchError(f"No rows found in table selector: {row_selector_use}")
-        
-        # Try to wait for visibility with a fallback
+
+        row = page.locator(selected_row_selector).first
+        LOGGER.info("Using row selector: %s", selected_row_selector)
+
+        # Ensure row is at least attached; then try visible but do not hard-fail on that.
+        await row.wait_for(state="attached", timeout=5_000)
         try:
             await row.wait_for(state="visible", timeout=5_000)
-            LOGGER.debug("Table row became visible after 5s wait")
+            LOGGER.debug("Selected row became visible after 5s wait")
         except TimeoutError:
-            LOGGER.warning("Row did not become visible within 5s, but proceeding anyway")
+            LOGGER.warning("Selected row not visible in 5s, proceeding with text extraction")
         
         await asyncio.sleep(1)  # Allow table to fully render
         LOGGER.debug("Waited 1s for final table render")
