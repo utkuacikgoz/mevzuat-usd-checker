@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from playwright.async_api import BrowserContext, Error, Page, TimeoutError, asyn
 from .config import Settings
 from .models import MevduatSnapshot
 
+LOGGER = logging.getLogger(__name__)
 
 CARD_SELECTOR = "#block-bistkydendeksleri"
 TABLE_BODY_SELECTOR = "#table-2-9-data"
@@ -22,8 +24,10 @@ class FetchError(RuntimeError):
 
 async def fetch_snapshot(settings: Settings, screenshot_path: Path) -> MevduatSnapshot:
     screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Starting fetch_snapshot for currency: %s", settings.target_currency)
 
     async with async_playwright() as playwright:
+        LOGGER.debug("Launching chromium browser (headless=%s)", settings.playwright_headless)
         browser = await playwright.chromium.launch(headless=settings.playwright_headless)
         try:
             context = await browser.new_context(
@@ -31,12 +35,15 @@ async def fetch_snapshot(settings: Settings, screenshot_path: Path) -> MevduatSn
                 timezone_id="Europe/Istanbul",
                 viewport={"width": 1600, "height": 1400},
             )
+            LOGGER.debug("Browser context created")
             try:
                 return await _fetch_with_context(context, settings, screenshot_path)
             finally:
                 await context.close()
+                LOGGER.debug("Browser context closed")
         finally:
             await browser.close()
+            LOGGER.debug("Browser closed")
 
 
 async def _fetch_with_context(
@@ -46,41 +53,73 @@ async def _fetch_with_context(
 ) -> MevduatSnapshot:
     page = await context.new_page()
     page.set_default_timeout(30_000)
+    LOGGER.info("Page created, navigating to %s", settings.target_url)
 
     try:
         await page.goto(settings.target_url, wait_until="domcontentloaded")
+        LOGGER.debug("Page loaded: domcontentloaded")
+        
         await page.wait_for_load_state("networkidle")
+        LOGGER.debug("Page loaded: networkidle")
+        
         await _dismiss_cookie_banner(page)
+        LOGGER.debug("Cookie banner dismissed")
+        
         await _activate_currency(page, settings.target_currency)
+        LOGGER.info("Currency %s activated", settings.target_currency)
         
         # Wait for table data to load with retries
         row = page.locator(ROW_SELECTOR).first
         await row.wait_for(state="visible")
+        LOGGER.debug("Table row is visible")
+        
         await asyncio.sleep(1)  # Allow table to render with new currency data
+        LOGGER.debug("Waited 1s for table render")
         
         # Verify currency is switched by checking cell content
         max_retries = 5
+        cells = None
         for attempt in range(max_retries):
             try:
                 cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
+                LOGGER.debug("Attempt %d: Got %d cells, cell[7]=%s (expected %s)", 
+                            attempt + 1, len(cells), 
+                            cells[7].strip() if len(cells) > 7 else "N/A", 
+                            settings.target_currency)
+                
                 if len(cells) > 7 and cells[7].strip() == settings.target_currency:
+                    LOGGER.debug("Currency match successful on attempt %d", attempt + 1)
                     break
+                    
                 await asyncio.sleep(0.5)
-            except Exception:
+            except Exception as e:
+                LOGGER.warning("Exception during cell read attempt %d: %s", attempt + 1, e)
                 await asyncio.sleep(0.5)
                 if attempt == max_retries - 1:
-                    raise FetchError("Currency data did not load within timeout.")
+                    raise FetchError("Currency data did not load within timeout.") from e
         
-        cells = [text.strip() for text in await row.locator("td").all_inner_texts()]
+        if cells is None:
+            raise FetchError("Failed to extract cells after all retries")
+        
+        LOGGER.debug("Cell data: index_name=%s, index_code=%s, updated_at=%s, current_value=%s, daily_change=%s",
+                    cells[0] if len(cells) > 0 else "N/A",
+                    cells[1] if len(cells) > 1 else "N/A",
+                    cells[2] if len(cells) > 2 else "N/A",
+                    cells[3] if len(cells) > 3 else "N/A",
+                    cells[4] if len(cells) > 4 else "N/A")
+        
         if len(cells) < 6 or not cells[3].strip():
             raise FetchError("Table row is missing expected columns or current value.")
 
         card = page.locator(CARD_SELECTOR)
         await card.scroll_into_view_if_needed()
+        LOGGER.debug("Card scrolled into view")
+        
         await asyncio.sleep(0.5)
         await card.screenshot(path=str(screenshot_path))
+        LOGGER.info("Screenshot saved to %s", screenshot_path)
 
-        return MevduatSnapshot(
+        snapshot = MevduatSnapshot(
             index_name=_clean(cells[0]),
             index_code=_clean(cells[1]),
             updated_at=_clean(cells[2]),
@@ -88,33 +127,63 @@ async def _fetch_with_context(
             daily_change_percent=_clean(cells[4]),
             currency=settings.target_currency,
         )
+        LOGGER.info("Snapshot created successfully: value=%s, currency=%s", 
+                   snapshot.current_value, snapshot.currency)
+        return snapshot
+        
     except TimeoutError as exc:
+        LOGGER.error("TimeoutError during fetch: %s", exc, exc_info=True)
         raise FetchError("Timed out while waiting for the mevduat table to load.") from exc
     except Error as exc:
+        LOGGER.error("Playwright Error during fetch: %s", exc, exc_info=True)
         raise FetchError(f"Playwright failed to load the target page: {exc}") from exc
+    except FetchError as exc:
+        LOGGER.error("FetchError: %s", exc, exc_info=True)
+        raise
+    except Exception as exc:
+        LOGGER.error("Unexpected error during fetch: %s", exc, exc_info=True)
+        raise FetchError(f"Unexpected error: {exc}") from exc
     finally:
         await page.close()
+        LOGGER.debug("Page closed")
 
 
 async def _dismiss_cookie_banner(page: Page) -> None:
+    LOGGER.debug("Attempting to dismiss cookie banner")
     button = page.locator("button").filter(
         has_text=re.compile(r"t[üu]m[üu]n[üu]\s+kabul\s+et", re.I)
     ).first
-    if await button.count():
+    count = await button.count()
+    LOGGER.debug("Cookie banner button count: %d", count)
+    
+    if count:
         try:
             await button.click(timeout=5_000)
+            LOGGER.debug("Cookie banner dismissed successfully")
         except TimeoutError:
+            LOGGER.warning("Timeout dismissing cookie banner, continuing anyway")
             return
+    else:
+        LOGGER.debug("No cookie banner found")
 
 
 async def _activate_currency(page: Page, currency: str) -> None:
+    LOGGER.debug("Attempting to activate currency: %s", currency)
     labels = page.locator(CURRENCY_LABEL_SELECTOR)
+    label_count = await labels.count()
+    LOGGER.debug("Found %d currency label elements", label_count)
+    
     match = labels.filter(has_text=re.compile(rf"^\s*{re.escape(currency)}\s*$", re.I)).first
-
-    if not await match.count():
+    match_count = await match.count()
+    LOGGER.debug("Currency selector match count for '%s': %d", currency, match_count)
+    
+    if not match_count:
         raise FetchError(f"Currency selector not found for: {currency}")
 
     await match.click()
+    LOGGER.debug("Currency button clicked for: %s", currency)
+    await asyncio.sleep(0.5)  # Allow UI to update
+    LOGGER.info("Currency activated: %s", currency)
 
 
 def _clean(value: str) -> str:
